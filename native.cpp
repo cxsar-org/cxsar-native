@@ -25,6 +25,10 @@ JNIEXPORT void JNICALL Java_cxsar_Main_entry(JNIEnv* env, jobject obj, jobjectAr
 	// retrieve it
 	auto hash_from_manifest = utils::extract_hash_from_zipfile(path);
 
+	miniz_cpp::zip_file file(path);
+
+	file.printdir(std::cout);
+
 	// release the native string, we don't need it anymore
 	env->ReleaseStringUTFChars(reinterpret_cast<jstring>(path_object), path);
 
