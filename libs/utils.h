@@ -8,11 +8,14 @@
 #include <ostream>
 
 #include "zip_file.h"
+
+#define HTTP_IMPLEMENTATION
 #include "http.h"
+
 #include "xor.hpp"
 
 namespace def {
-	#define URL xorstr_("http://127.0.0.1/");
+	#define URL xorstr_("http://127.0.0.1/website/");
 }
 
 namespace utils {
@@ -24,7 +27,7 @@ namespace utils {
 		- That's it
 
 	*/
-	static auto extract_hash_from_zipfile(std::string path) -> const char* {
+	static auto extract_hash_from_zipfile(std::string path) -> std::string {
 		miniz_cpp::zip_file file(path);
 
 		auto names = file.namelist();
@@ -56,9 +59,59 @@ namespace utils {
 			// convert it to a C++ string
 			// note: every line ends with \r\n so that means this will go to [hash]\r as the string
 			std::string native_str = std::string(hash_prefix);
-			native_str = native_str.substr(0, native_str.length() - 1);
+			native_str = native_str.substr(0, native_str.length() - 2);
 
-			return native_str.c_str();
+			return native_str;
+		}
+
+		return xorstr_("None");
+	}
+
+	/*
+		Retrieves the main-class of the parsed zipfile by reading the manifest
+		This is basically the same code as extract_hash_from_zipfile
+	*/
+	static auto extract_main_class_from_zipfile(std::vector<std::uint8_t> buffer) -> std::string {
+		miniz_cpp::zip_file file(buffer);
+
+		auto names = file.namelist();
+
+		for (int i = 0; i < names.size(); ++i)
+		{
+			std::string filename = names[i];
+
+			if (std::strstr(filename.c_str(), xorstr_("MANIFEST.MF")) == nullptr)
+				continue;
+
+			auto info = file.getinfo(filename);
+			auto content = file.read(info);
+
+			auto main_class_str = xorstr("Main-Class: ");
+
+			// "cxsar-hash:" is appended to the file, get the pointer to that first occurance
+			const char* cls_prefix = std::strstr(content.c_str(), main_class_str.crypt_get());
+
+			// check if we actually found it
+			if (cls_prefix == nullptr) {
+				std::cout << xorstr_("Main class not found in manifest, are you sure it's the correct jar file?") << std::endl;
+				return xorstr_("None");
+			}
+
+			// we did so the hash starts here next
+			cls_prefix += main_class_str.size();
+
+			// convert it to a C++ string
+			// note: every line ends with \r\n so that means this will go to [hash]\r as the string
+			std::string native_str = std::string(cls_prefix);
+
+			// \r\n\r\n is appended for some reason...
+			// imagine debugging for an hour only to find this out :D
+			native_str = native_str.substr(0, native_str.length() - 4);
+
+			// replace . with /
+			std::replace(native_str.begin(), native_str.end(), '.', '/');
+
+			return native_str;
 		}
 
 		return xorstr_("None");
@@ -76,48 +129,36 @@ namespace utils {
 			buffer[i] ^= key[i % key.size()];
 	}
 
-	/* NOTE: This returns a GLOBAL reference, please clean it up
-		using env->DeleteGlobalRef!
+	/*
+		Execute the main function!
 	*/
-	static auto get_classloader_from_object(JNIEnv* env, jobject obj) -> jobject {
-		jclass object_class = env->GetObjectClass(obj);
+	static auto execute_entry_point(JNIEnv* env, std::string class_name, jobjectArray args) -> bool {
+		// get the main class
+		auto main_class = env->FindClass(class_name.c_str());
 
-		if (!object_class)
-			return nullptr;
-
-		auto get_classloader_mid = env->GetMethodID(object_class, xorstr_("getClassLoader"), xorstr_("()Ljava/lang/ClassLoader;"));
-
-		if (!get_classloader_mid)
-		{
-			env->DeleteLocalRef(object_class);
-			return nullptr;
+		if (!main_class) {
+			std::cout << "Couldn't find main class" << std::endl;
+			return false;
 		}
 
-		jobject the_classloader = env->CallObjectMethod(obj, get_classloader_mid);
+		// find main method
+		auto main = env->GetStaticMethodID(main_class, xorstr_("main"), xorstr_("([Ljava/lang/String;)V"));
 
-		if (!the_classloader)
-		{
-			env->DeleteLocalRef(object_class);
-			return nullptr;
-		}
+		if (!main)
+			return false;
 
-		return env->NewGlobalRef(the_classloader);
+		env->CallStaticVoidMethod(main_class, main, args);
+		env->DeleteLocalRef(main_class);
+
+		return true;
 	}
 
 	/*
 		- Load jar file from memory
 	*/
-	static auto load_jar_from_memory(JNIEnv* env, jobject loader, std::vector<std::uint8_t> buffer) {
+	static auto load_jar_from_memory(JNIEnv* env, std::vector<std::uint8_t> buffer) {
 		miniz_cpp::zip_file zip(buffer);
 		auto info_list = zip.infolist();
-
-		jclass secure_classloader_class = env->FindClass(xorstr_("java/security/SecureClassLoader"));
-		auto secure_classloader_init = env->GetMethodID(secure_classloader_class, xorstr_("<init>"), xorstr_("(Ljava/lang/ClassLoader;)V"));
-
-		auto class_loader = env->NewObject(secure_classloader_class, secure_classloader_init, loader);
-
-		env->DeleteLocalRef(secure_classloader_class);
-		env->DeleteLocalRef(loader);
 
 		// iterate all files
 		for (int i = 0; i < info_list.size(); ++i)
@@ -131,15 +172,16 @@ namespace utils {
 				// read entry
 				auto data_str = zip.read(info);
 
+				// cast it
 				auto native_buffer = reinterpret_cast<std::uint8_t*>(const_cast<char*>(data_str.c_str()));
+
+				auto real_name = info.filename.substr(0, info.filename.length() - std::string(xorstr_(".class")).length());
 
 				// load the class (duh)
 				// NOTE: might have to optimize this a tad more
-				env->DefineClass(info.filename.substr(0, info.filename.length() - std::string(xorstr_(".class")).length()).c_str(), class_loader, reinterpret_cast<const jbyte*>(native_buffer), info.file_size);
+				auto res = env->DefineClass(real_name.c_str(), NULL, reinterpret_cast<const jbyte*>(native_buffer), info.file_size);
 			}
 		}
-
-		env->DeleteLocalRef(class_loader);
 	}
 
 	/*
@@ -150,8 +192,9 @@ namespace utils {
 		std::vector<std::uint8_t> res;
 
 		// Set up request
-		std::string data = xorstr_("target_hash=") + file_hash;
-		std::string target_url = URL + xorstr_("dl/");
+		std::string data = xorstr_("dl=1&hwid=none&hash=") + file_hash;
+		std::string target_url = URL;
+		target_url += xorstr_("download.php");
 
 		// Make the request
 		http_t* req = http_post(target_url.c_str(), data.c_str(), data.length(), nullptr);
@@ -181,38 +224,48 @@ namespace utils {
 		if (split == nullptr)
 		{
 			std::cout << xorstr_("Incorrect response data!") << std::endl;
+			std::cout << buffer << std::endl;
 			http_release(req);
 			return res;
 		}
 
-		// Get the message length
-		auto message_len = split - buffer;
+		// Skip the ':'
+		split++;
 
-		// Spawn buffer for the message
-		std::unique_ptr<std::uint8_t[]> message_buffer = std::make_unique<std::uint8_t[]>(message_len);
+		// calculate size of the response code
+		auto response_code_len = (split - buffer);
 
-		// Convert the buffer to the actual message
-		const char* message = reinterpret_cast<const char*>(message_buffer.get());
+		// spawn a buffer for it
+		std::unique_ptr<std::uint8_t[]> response_code = std::make_unique<std::uint8_t[]>(response_code_len);
 
-		// Error code was given out
-		if (strstr(message, xorstr_("OK")) == nullptr)
+		// copy the response code into the buffer
+		std::memcpy(response_code.get(), buffer, response_code_len);
+
+		// calculate size of the message
+		auto message_len = (buffer + req->response_size) - split;
+
+		// spawn a buffer for the message
+		std::unique_ptr<std::uint8_t[]> message_data = std::make_unique<std::uint8_t[]>(message_len);
+
+		// cast message into a character array
+		auto message = reinterpret_cast<const char*>(message_data.get());
+
+		// copy the message into the buffer
+		std::memcpy(message_data.get(), split, message_len);
+
+		// check the response code for an OK
+		if (std::strstr(reinterpret_cast<const char*>(response_code.get()), xorstr_("OK")) == nullptr)
 		{
 			std::cout << "Error with request, response: " << message << std::endl;
 			http_release(req);
 			return res;
 		}
 
-		// Jump to next
-		buffer = split + message_len;
+		// resize response buffer
+		res.resize(message_len);
 
-		// Offset
-		std::size_t offset = buffer - req->response_data;
-
-		// Reset the vector
-		res.resize(req->response_size - offset);
-
-		// copy response buffer to the vector
-		std::memcpy(&res[0], buffer, req->response_size - offset);
+		// copy the buffer into the vector
+		std::memcpy(&res[0], message, message_len);
 
 		// release and return result
 		http_release(req);

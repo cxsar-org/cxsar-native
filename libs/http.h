@@ -458,7 +458,7 @@ http_t* http_post(char const* url, void const* data, size_t size, void* memctx)
         internal->request_header_large = (char*)HTTP_MALLOC(memctx, request_header_len + 1);
         request_header = internal->request_header_large;
     }
-    sprintf(request_header, "POST %s HTTP/1.0\r\nHost: %s:%s\r\nContent-Length: %d\r\n\r\n", resource, address, port,
+    sprintf(request_header, "POST %s HTTP/1.0\r\nHost: %s:%s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n\r\n", resource, address, port,
         (int)size);
 
     internal->request_data_size = size;
