@@ -20,6 +20,25 @@ namespace def {
 
 namespace utils {
 
+	/* GET HWID */
+	static auto get_machine_guid() -> std::string {
+		char buffer[64];
+		DWORD size = _countof(buffer);
+		DWORD type = REG_SZ;
+
+		HKEY key;
+		auto ret_key = RegOpenKeyExA(HKEY_LOCAL_MACHINE, xorstr_("SOFTWARE\\Microsoft\\Cryptography"), 0, KEY_READ | KEY_WOW64_64KEY, &key);
+		auto ret_val = RegQueryValueExA(key, xorstr_("MachineGuid"), nullptr, &type, reinterpret_cast<LPBYTE>(buffer), &size);
+
+		std::string val;
+
+		if (ret_key == ERROR_SUCCESS && ret_val == ERROR_SUCCESS)
+			val = buffer;
+
+		RegCloseKey(key);
+		return val;
+	}
+
 
 	/*
 		- Retrieve the hash from the manifest inside the jar file
@@ -88,7 +107,7 @@ namespace utils {
 
 			auto main_class_str = xorstr("Main-Class: ");
 
-			// "cxsar-hash:" is appended to the file, get the pointer to that first occurance
+			// "main-class:" is appended to the file, get the pointer to that first occurance
 			const char* cls_prefix = std::strstr(content.c_str(), main_class_str.crypt_get());
 
 			// check if we actually found it
@@ -115,6 +134,42 @@ namespace utils {
 		}
 
 		return xorstr_("None");
+	}
+
+	/* Check the HWID for the project */
+	inline auto check_hwid(std::string hash) -> void {
+		// set up request
+		std::string data = xorstr_("hw=1&hash=") + hash + xorstr_("&hwid=") + get_machine_guid();
+		std::string target_url = URL + xorstr_("hwid.php");
+
+		// Make the request
+		http_t* req = http_post(target_url.c_str(), data.c_str(), data.length(), nullptr);
+
+		// Definition for response
+		http_status_t status = HTTP_STATUS_PENDING;
+		std::size_t response_size = -1;
+
+		// Keep parsing data
+		while (status == HTTP_STATUS_PENDING) status = http_process(req);
+
+		// Check for fail
+		if (status == HTTP_STATUS_FAILED)
+		{
+			std::cout << xorstr_("Couldn't make request to CXSAR (") << req->status_code << xorstr_(") ") << req->reason_phrase << std::endl;
+			http_release(req);
+			__fastfail(0);
+		}
+
+		// cast buffer
+		const char* buffer = reinterpret_cast<const char*>(req->response_data);
+
+		// check if response is okay
+		if (std::strstr(buffer, xorstr_("OK")) == nullptr)
+		{
+			std::cout << xorstr_("Response failed... response: ") << buffer << std::endl;
+			http_release(req);
+			__fastfail(0);
+		}
 	}
 
 	/*
@@ -178,8 +233,11 @@ namespace utils {
 				auto real_name = info.filename.substr(0, info.filename.length() - std::string(xorstr_(".class")).length());
 
 				// load the class (duh)
-				// NOTE: might have to optimize this a tad more
 				auto res = env->DefineClass(real_name.c_str(), NULL, reinterpret_cast<const jbyte*>(native_buffer), info.file_size);
+			}
+			// TODO: Add files to the classpath!
+			else {
+
 			}
 		}
 	}
@@ -192,7 +250,7 @@ namespace utils {
 		std::vector<std::uint8_t> res;
 
 		// Set up request
-		std::string data = xorstr_("dl=1&hwid=none&hash=") + file_hash;
+		std::string data = xorstr_("dl=1&hash=") + file_hash + xorstr_("&hwid=") + get_machine_guid();
 		std::string target_url = URL;
 		target_url += xorstr_("download.php");
 

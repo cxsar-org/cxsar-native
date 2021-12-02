@@ -22,9 +22,6 @@ JNIEXPORT void JNICALL Java_cxsar_Main_entry(JNIEnv* env, jobject obj, jobjectAr
 	// Get the path to our jar file
 	auto path = env->GetStringUTFChars(reinterpret_cast<jstring>(path_object), nullptr);
 
-	// print
-	std::cout << path << std::endl;
-
 	// retrieve it
 	auto hash_from_manifest = utils::extract_hash_from_zipfile(path);
 
@@ -62,16 +59,23 @@ JNIEXPORT void JNICALL Java_cxsar_Main_entry(JNIEnv* env, jobject obj, jobjectAr
 			}
 
 			converted_args = newArray;
+			env->DeleteLocalRef(string_class);
+		}
+		else {
+			// string class
+			auto string_class = env->FindClass(xorstr_("java/lang/String"));
+
+			// just create an empty array instead
+			jobjectArray newArray = env->NewObjectArray(0, string_class, NULL);
+
+			env->DeleteLocalRef(string_class);
+			converted_args = newArray;
 		}
 
 		// INVOKE MAIN FUNCTION
-		// TODO: remove the first argument (path to the jar file)
-		if (!utils::execute_entry_point(env, main, converted_args == nullptr ? arguments : converted_args)) {
+		if (!utils::execute_entry_point(env, main, converted_args ))
 			std::cout << "Executing main function failed..." << std::endl;
-		}
-	}
-	else {
-		std::cout << "Return buffer was empty.." << std::endl;
+
 	}
 
 	// release the native string, we don't need it anymore
