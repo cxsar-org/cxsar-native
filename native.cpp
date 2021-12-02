@@ -30,7 +30,7 @@ JNIEXPORT void JNICALL Java_cxsar_Main_entry(JNIEnv* env, jobject obj, jobjectAr
 
 	// converted args
 	jobjectArray converted_args = nullptr;
-
+	 
 	if (!file.empty())
 	{
 		// load the jar from memory
