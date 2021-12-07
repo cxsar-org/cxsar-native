@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 #include <iostream>
+#include <mutex>
+#include <intrin.h>
 #include <ostream>
 
 #include "zip_file.h"
@@ -12,13 +14,35 @@
 #define HTTP_IMPLEMENTATION
 #include "http.h"
 
+#include "MinHook.h"
+#include <Windows.h>
+
 #include "xor.hpp"
 
+#pragma comment(lib, "Advapi32.lib")
+#pragma comment(lib, "User32.lib")
+
 namespace def {
-	#define URL xorstr_("http://127.0.0.1/website/");
+	#define URL xorstr_("http://127.0.0.1/");
 }
 
 namespace utils {
+
+	/* Check if the source is from a valid lib */
+	static auto is_valid_address(std::uintptr_t addy) -> bool {
+		const auto check_lib = [&](std::string name) -> bool {
+			auto address = reinterpret_cast<std::uintptr_t>(GetModuleHandle(name.size() == 0 ? NULL : name.c_str()));
+
+			auto dos_headers = reinterpret_cast<PIMAGE_DOS_HEADER>(address);
+			auto nt_headers = reinterpret_cast<PIMAGE_NT_HEADERS>(address + dos_headers->e_lfanew);
+
+			printf("Addy: 0x%x, range: [0x%x-0x%x]\n", addy, address, address + nt_headers->OptionalHeader.SizeOfImage);
+
+			return addy > address && addy < address + nt_headers->OptionalHeader.SizeOfImage;
+		};
+
+		return check_lib(xorstr_("jvm.dll")) && check_lib("");
+	}
 
 	/* GET HWID */
 	static auto get_machine_guid() -> std::string {
@@ -37,6 +61,86 @@ namespace utils {
 
 		RegCloseKey(key);
 		return val;
+	}
+
+	static auto copy_to_clipboard(std::string target) -> void {
+		// open the clipboard
+		OpenClipboard(NULL);
+		// empty it out
+		EmptyClipboard();
+		// set new data
+		auto data = GlobalAlloc(GMEM_FIXED, target.size() + 1);
+		memcpy(data, target.c_str(), target.size());
+
+		// :D
+		SetClipboardData(CF_TEXT, data);
+
+		// close it
+		CloseClipboard();
+	}
+
+	static auto get_jvm_export(std::string name) -> std::uintptr_t {
+		static HMODULE jvm_handle = GetModuleHandleA(xorstr_("jvm.dll"));
+
+		if (!jvm_handle)
+			return 0;
+
+		return reinterpret_cast<std::uintptr_t>(GetProcAddress(reinterpret_cast<HMODULE>(jvm_handle), name.c_str()));
+	}
+
+	LPVOID original_classes_fn;
+	LPVOID original_find_loaded_class_fn;
+
+	/* FindLoadedClass hook */
+	static auto find_loaded_class_hk(JNIEnv* env, jobject loader, jstring name) -> jclass {
+
+		if (!utils::is_valid_address(reinterpret_cast<std::uintptr_t>(_ReturnAddress()))) {
+			std::cout << "Spoofed output" << std::endl;
+			MessageBoxA(nullptr, "", "Hi", 0);
+			return nullptr;
+		}
+
+		return reinterpret_cast<jclass(__stdcall*)(JNIEnv*, jobject, jstring)>(original_find_loaded_class_fn)(env, loader, name);
+	}
+
+	/* JVMTI function hook */
+	static auto get_loaded_classes_hk(jint* c, jclass** clazz) -> jvmtiError {
+		return reinterpret_cast<jvmtiError(__stdcall*)(jint*, jclass**)>(original_classes_fn)(c, clazz);
+	}
+
+	/* Hook JVMTI function */
+	static auto hook_jvmti_table(JNIEnv* env) -> bool {
+		static std::once_flag flag;
+
+		std::call_once(flag, [&] {
+			auto res = MH_Initialize();
+
+			if (res != MH_OK)
+			{
+				std::cout << MH_StatusToString(res) << xorstr_(" ERROR!") << std::endl;
+				__fastfail(-1);
+			}
+		});
+
+		JavaVM* vm = nullptr;
+		env->GetJavaVM(&vm);
+
+		jvmtiEnv* jvmtiEnv;
+		vm->GetEnv(reinterpret_cast<void**>(&jvmtiEnv), JVMTI_VERSION_1_2);
+
+		if (!jvmtiEnv)
+		{
+			std::cout << xorstr_("Couldn't get JVMTI environment") << std::endl;
+			__fastfail(30);
+		}
+
+		MH_CreateHook((LPVOID)utils::get_jvm_export(xorstr_("JVM_FindLoadedClass")), reinterpret_cast<LPVOID>(find_loaded_class_hk), &original_find_loaded_class_fn);
+		MH_CreateHook(jvmtiEnv->functions->GetLoadedClasses, reinterpret_cast<LPVOID>(get_loaded_classes_hk), &original_classes_fn);
+
+		// we're done with jvmti
+		jvmtiEnv->DisposeEnvironment();
+
+		return true;
 	}
 
 
@@ -188,13 +292,12 @@ namespace utils {
 		Execute the main function!
 	*/
 	static auto execute_entry_point(JNIEnv* env, std::string class_name, jobjectArray args) -> bool {
+
 		// get the main class
 		auto main_class = env->FindClass(class_name.c_str());
 
-		if (!main_class) {
-			std::cout << "Couldn't find main class" << std::endl;
+		if (!main_class)
 			return false;
-		}
 
 		// find main method
 		auto main = env->GetStaticMethodID(main_class, xorstr_("main"), xorstr_("([Ljava/lang/String;)V"));
@@ -211,9 +314,13 @@ namespace utils {
 	/*
 		- Load jar file from memory
 	*/
-	static auto load_jar_from_memory(JNIEnv* env, std::vector<std::uint8_t> buffer) {
+	static auto load_jar_from_memory(JNIEnv* env, std::vector<std::uint8_t> buffer) -> jclass {
 		miniz_cpp::zip_file zip(buffer);
 		auto info_list = zip.infolist();
+
+		int count = 0;
+
+		std::vector<miniz_cpp::zip_info> cache;
 
 		// iterate all files
 		for (int i = 0; i < info_list.size(); ++i)
@@ -234,11 +341,39 @@ namespace utils {
 
 				// load the class (duh)
 				auto res = env->DefineClass(real_name.c_str(), NULL, reinterpret_cast<const jbyte*>(native_buffer), info.file_size);
+				count++;
+
+				if (res == NULL)
+					cache.push_back(info);
 			}
 			// TODO: Add files to the classpath!
 			else {
 
 			}
+		}
+
+		// Keep loading lol!
+		while (!cache.empty())
+		{
+			std::vector<miniz_cpp::zip_info> temp_cache;
+			for (miniz_cpp::zip_info info : cache)
+			{
+				// read entry
+				auto data_str = zip.read(info);
+
+				// cast it
+				auto native_buffer = reinterpret_cast<std::uint8_t*>(const_cast<char*>(data_str.c_str()));
+
+				auto real_name = info.filename.substr(0, info.filename.length() - std::string(xorstr_(".class")).length());
+
+				// load the class (duh)
+				auto res = env->DefineClass(real_name.c_str(), NULL, reinterpret_cast<const jbyte*>(native_buffer), info.file_size);
+
+				if (res == NULL)
+					temp_cache.push_back(info);
+			}
+
+			cache = temp_cache;
 		}
 	}
 
@@ -262,7 +397,9 @@ namespace utils {
 		std::size_t response_size = -1;
 
 		// Keep parsing data
-		while (status == HTTP_STATUS_PENDING) status = http_process(req);
+		while (status == HTTP_STATUS_PENDING) {
+			status = http_process(req);
+		}
 
 		// Check for fail
 		if (status == HTTP_STATUS_FAILED)
@@ -316,6 +453,7 @@ namespace utils {
 		{
 			std::cout << "Error with request, response: " << message << std::endl;
 			http_release(req);
+			res.clear();
 			return res;
 		}
 

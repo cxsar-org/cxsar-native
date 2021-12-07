@@ -222,6 +222,8 @@ Releases the resources acquired by `http_get` or `http_post`. Should be call whe
 #define HTTP_FREE( ctx, ptr ) ( free( ptr ) )
 #endif
 
+#include "xor.hpp"
+
 typedef struct http_internal_t
 {
     /* keep this at the top!*/
@@ -420,7 +422,7 @@ http_t* http_get(char const* url, void* memctx)
         internal->request_header_large = (char*)HTTP_MALLOC(memctx, request_header_len + 1);
         request_header = internal->request_header_large;
     }
-    sprintf(request_header, "GET %s HTTP/1.0\r\nHost: %s:%s\r\n\r\n", resource, address, port);
+    sprintf(request_header, xorstr_("GET %s HTTP/1.0\r\nHost: %s:%s\r\n\r\n"), resource, address, port);
 
     return &internal->http;
 }
@@ -458,7 +460,7 @@ http_t* http_post(char const* url, void const* data, size_t size, void* memctx)
         internal->request_header_large = (char*)HTTP_MALLOC(memctx, request_header_len + 1);
         request_header = internal->request_header_large;
     }
-    sprintf(request_header, "POST %s HTTP/1.0\r\nHost: %s:%s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n\r\n", resource, address, port,
+    sprintf(request_header, xorstr_("POST %s HTTP/1.0\r\nHost: %s:%s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n\r\n"), resource, address, port,
         (int)size);
 
     internal->request_data_size = size;
@@ -604,10 +606,10 @@ http_status_t http_process(http_t* http)
             status_line = reason_phrase_end + 1;
 
             // extract content type
-            char const* content_type_start = strstr(status_line, "Content-Type: ");
+            char const* content_type_start = strstr(status_line, xorstr_("Content-Type: "));
             if (content_type_start)
             {
-                content_type_start += strlen("Content-Type: ");
+                content_type_start += strlen(xorstr_("Content-Type: "));
                 char const* content_type_end = strstr(content_type_start, "\r\n");
                 if (content_type_end)
                 {

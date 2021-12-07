@@ -16,6 +16,9 @@ JNIEXPORT void JNICALL Java_cxsar_Main_entry(JNIEnv* env, jobject obj, jobjectAr
 	if (!(arg_count > 0))
 		return;
 
+	// Hook JVMTI table
+	//utils::hook_jvmti_table(env);
+
 	// First argument is the path to the jar file
 	jobject path_object = env->GetObjectArrayElement(arguments, 0);
 
@@ -38,9 +41,6 @@ JNIEXPORT void JNICALL Java_cxsar_Main_entry(JNIEnv* env, jobject obj, jobjectAr
 
 		// main class
 		auto main = utils::extract_main_class_from_zipfile(file);
-
-		if (env->ExceptionCheck())
-			env->ExceptionDescribe();
 
 		// meaning our path isn't the only one
 		if (arg_count > 1)
@@ -75,9 +75,15 @@ JNIEXPORT void JNICALL Java_cxsar_Main_entry(JNIEnv* env, jobject obj, jobjectAr
 		// INVOKE MAIN FUNCTION
 		if (!utils::execute_entry_point(env, main, converted_args ))
 			std::cout << "Executing main function failed..." << std::endl;
-
+	}
+	else {
+		// copy HWID to the clipboard
+		utils::copy_to_clipboard(utils::get_machine_guid());
 	}
 
 	// release the native string, we don't need it anymore
 	env->ReleaseStringUTFChars(reinterpret_cast<jstring>(path_object), path);
+
+	// clear any exception we might've kept dangling
+	env->ExceptionClear();
 }
